@@ -26,6 +26,7 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.tensorboard import SummaryWriter
 
 from model import GPTConfig, GPT
 
@@ -39,6 +40,8 @@ eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+#ma# local logging(tensorboard)
+tb_comment="LM"
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
@@ -132,7 +135,7 @@ def get_batch(split):
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
-best_val_loss = 1e9
+best_score = 1e9
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
@@ -177,7 +180,8 @@ elif init_from == 'resume':
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
+    #ma# undefined metric
+    best_score = checkpoint['best_score']
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -212,20 +216,26 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
+#ma# ouput bpb scores
 @torch.no_grad()
 def estimate_loss():
     out = {}
+    ave_bpb = {}
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        bpbs = []
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
+            bpb = loss.item()*math.log2(math.e)
+            bpbs.append(bpb)
         out[split] = losses.mean()
+        ave_bpb[split] = sum(bpbs)/len(bpbs)
     model.train()
-    return out
+    return out, ave_bpb
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it):
@@ -242,6 +252,7 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 # logging
+writer = SummaryWriter(comment=tb_comment)
 if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
@@ -261,8 +272,15 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        losses, ave_bpb = estimate_loss()
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, train_bpb {ave_bpb['train']:.4f}, val bpb {ave_bpb['val']:.4f}")
+
+        #ma# local logging
+        writer.add_scalar("Loss/train", losses['train'], iter_num)
+        writer.add_scalar("Loss/val", losses['val'], iter_num)
+        writer.add_scalar("train_bpb", ave_bpb['train'], iter_num)
+        writer.add_scalar("val bpb", ave_bpb['val'], iter_num)
+
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -271,15 +289,17 @@ while True:
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
+
+        #ma# save model with best bpb
+        if ave_bpb['val'] < best_score or always_save_checkpoint:
+            best_score = ave_bpb['val']
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'model_args': model_args,
                     'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
+                    'best_score': best_score,
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
@@ -324,7 +344,8 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        bpbf = lossf*math.log2(math.e)
+        print(f"iter {iter_num}: loss {lossf:.4f}, bpb {bpbf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     iter_num += 1
     local_iter_num += 1
 
