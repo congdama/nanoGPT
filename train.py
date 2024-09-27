@@ -28,7 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.tensorboard import SummaryWriter
 
-from model import GPTConfig, GPT
+from model_alibi import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -41,7 +41,7 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 #ma# local logging(tensorboard)
-tb_comment="LM"
+tb_comment ="LM"
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
