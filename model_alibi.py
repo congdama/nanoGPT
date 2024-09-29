@@ -17,6 +17,7 @@ from torch.nn import functional as F
 import matplotlib.pyplot as plt
 import pdb
 
+#ma# several functions for ALiBi
 def fill_with_neg_inf(t):
     """FP16-compatible function that fills a input_ids with -inf."""
     return t.float().fill_(float("-inf")).type_as(t)
@@ -86,7 +87,7 @@ class CausalSelfAttention(nn.Module):
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             # normal attention mask
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-            #ma# apply alibi attention weight
+            #ma# add ALiBi weights
             att = att + attention_mask
             
             att = F.softmax(att, dim=-1)
@@ -170,7 +171,7 @@ class GPT(nn.Module):
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
-        #ma# get alibi attention mask
+        #ma# some values in ALiBi
         self.max_tokens = self.config.block_size
         self.maxpos = self.config.block_size
         self.attn_heads = self.config.n_head
@@ -199,7 +200,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    #ma# Combining different attention masks
+    #ma# function to get ALiBi weights
     def buffered_future_mask(self, tensor):
         dim = tensor.size(1)
         if (
@@ -218,17 +219,15 @@ class GPT(nn.Module):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        #ma# when using ALiBi, position infromation is containing is ALiBi is position infromation weights, position embedding is not need 
         #pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-
-        #ma# alibi is position infromation, so do not need position embedding
         #pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
 
-        #ma# get combined attention mask
+        #ma# get ALiBi weights
         attention_mask = self.buffered_future_mask(tok_emb)
-        #attention_mask=None
         #tok_emb=tok_emb+pos_emb
         x = self.transformer.drop(tok_emb)
         for block in self.transformer.h:
